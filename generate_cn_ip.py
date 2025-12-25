@@ -82,6 +82,15 @@ def get_maxmind_cn() -> list[str]:
     return ip_list
 
 
+def sort_key(cidr: str):
+    net = ipaddress.ip_network(cidr, strict=False)
+    return (
+        net.version,                     # IPv4 在前，IPv6 在后
+        int(net.network_address),         # 网络地址数值
+        net.prefixlen                     # 前缀长度
+    )
+
+
 def main():
     all_ip_cidr = []
 
@@ -96,11 +105,8 @@ def main():
     # CIDR 聚合
     all_ip_cidr = aggregate(all_ip_cidr)
 
-    # 稳定排序（IPv4 / IPv6 均正确）
-    all_ip_cidr = sorted(
-        all_ip_cidr,
-        key=lambda x: ipaddress.ip_network(x, strict=False)
-    )
+    # 稳定排序（修复 IPv4 / IPv6 比较问题）
+    all_ip_cidr = sorted(all_ip_cidr, key=sort_key)
 
     result = {
         "version": 3,
