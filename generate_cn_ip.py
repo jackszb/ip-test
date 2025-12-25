@@ -1,29 +1,33 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import math
 import requests
 import json
 import os
 import ipaddress
 import maxminddb
+from aggregate6 import aggregate
 
-# ================= 数据源 =================
+# ======================
+# 数据源（全部 CN）
+# ======================
 
 CHNROUTES2_URL = "https://raw.githubusercontent.com/misakaio/chnroutes2/master/chnroutes.txt"
 APNIC_URL = "https://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest"
 MAXMIND_URL = "https://raw.githubusercontent.com/Dreamacro/maxmind-geoip/release/Country.mmdb"
 
-# ================= 输出 =================
+# ======================
+# 输出文件（根目录）
+# ======================
 
 OUTPUT_JSON = "cn-ip.json"
 OUTPUT_SRS = "cn-ip.srs"
 
-# ========================================
 
+# ======================
+# 数据获取
+# ======================
 
 def get_chnroutes2() -> list[str]:
-    r = requests.get(CHNROUTES2_URL, timeout=30)
+    r = requests.get(CHNROUTES2_URL, timeout=60)
     r.raise_for_status()
     return [
         line.strip()
@@ -33,10 +37,10 @@ def get_chnroutes2() -> list[str]:
 
 
 def get_apnic_cn() -> list[str]:
-    r = requests.get(APNIC_URL, timeout=30)
+    r = requests.get(APNIC_URL, timeout=60)
     r.raise_for_status()
 
-    result = []
+    ip_list = []
 
     for line in r.text.splitlines():
         if line.startswith("#"):
@@ -46,97 +50,110 @@ def get_apnic_cn() -> list[str]:
         if len(parts) < 7:
             continue
 
-        cc, ip_type = parts[1], parts[2]
-        if cc != "CN":
+        country, ip_type = parts[1], parts[2]
+        if country != "CN":
             continue
 
         if ip_type == "ipv4":
             ip = parts[3]
             count = int(parts[4])
             prefix = 32 - int(math.log2(count))
-            result.append(f"{ip}/{prefix}")
+            ip_list.append(f"{ip}/{prefix}")
 
         elif ip_type == "ipv6":
             ip = parts[3]
             prefix = parts[4]
-            result.append(f"{ip}/{prefix}")
+            ip_list.append(f"{ip}/{prefix}")
 
-    return result
+    return ip_list
 
 
 def get_maxmind_cn() -> list[str]:
-    """
-    最大覆盖但严格 CN：
-    - country == CN
-    - registered_country == CN
-    """
-    r = requests.get(MAXMIND_URL, timeout=30)
+    r = requests.get(MAXMIND_URL, timeout=60)
     r.raise_for_status()
 
-    mmdb_file = "Country.mmdb"
-    with open(mmdb_file, "wb") as f:
+    with open("Country.mmdb", "wb") as f:
         f.write(r.content)
 
-    reader = maxminddb.open_database(mmdb_file)
-    result = []
+    reader = maxminddb.open_database("Country.mmdb")
+    ip_list = []
 
     for cidr, info in reader:
         country = None
-
         if info.get("country"):
             country = info["country"].get("iso_code")
-
-        if country != "CN" and info.get("registered_country"):
+        elif info.get("registered_country"):
             country = info["registered_country"].get("iso_code")
 
         if country == "CN":
-            result.append(str(cidr))
+            ip_list.append(str(cidr))
 
     reader.close()
-    os.remove(mmdb_file)
-    return result
+    os.remove("Country.mmdb")
+    return ip_list
 
+
+# ======================
+# 处理逻辑
+# ======================
+
+def sort_key(cidr: str):
+    net = ipaddress.ip_network(cidr, strict=False)
+    return (
+        net.version,             # IPv4 在前，IPv6 在后
+        int(net.network_address),
+        net.prefixlen
+    )
+
+
+def remove_covered_ipv4(cidrs: list[str]) -> list[str]:
+    """
+    移除被更大 IPv4 网段完全覆盖的子网
+    """
+    networks = [
+        ipaddress.IPv4Network(c, strict=False)
+        for c in cidrs
+    ]
+
+    # 按网络地址 + 前缀排序（父网段优先）
+    networks.sort(key=lambda n: (int(n.network_address), n.prefixlen))
+
+    result: list[ipaddress.IPv4Network] = []
+    for net in networks:
+        if not any(net.subnet_of(existing) for existing in result):
+            result.append(net)
+
+    return [str(n) for n in result]
+
+
+# ======================
+# 主流程
+# ======================
 
 def main():
-    raw_list: list[str] = []
+    all_ip_cidr: list[str] = []
 
-    print("Fetching chnroutes2 …")
-    raw_list.extend(get_chnroutes2())
+    # 收集三类 CN IP
+    all_ip_cidr.extend(get_chnroutes2())
+    all_ip_cidr.extend(get_apnic_cn())
+    all_ip_cidr.extend(get_maxmind_cn())
 
-    print("Fetching APNIC CN …")
-    raw_list.extend(get_apnic_cn())
+    # 去重（字符串级）
+    all_ip_cidr = list(set(all_ip_cidr))
 
-    print("Fetching MaxMind CN …")
-    raw_list.extend(get_maxmind_cn())
+    # 拆分 IPv4 / IPv6
+    ipv4_list = [c for c in all_ip_cidr if ":" not in c]
+    ipv6_list = [c for c in all_ip_cidr if ":" in c]
 
-    # === 去重 ===
-    raw_list = list(set(raw_list))
+    # IPv4：聚合 + 去掉被覆盖子网
+    ipv4_list = aggregate(ipv4_list)
+    ipv4_list = remove_covered_ipv4(ipv4_list)
 
-    ipv4_set: set[ipaddress.IPv4Network] = set()
-    ipv6_set: set[ipaddress.IPv6Network] = set()
+    # IPv6：不聚合，仅去重 + 排序（最大覆盖）
+    ipv6_list = sorted(set(ipv6_list), key=sort_key)
 
-    for cidr in raw_list:
-        try:
-            net = ipaddress.ip_network(cidr, strict=False)
-        except ValueError:
-            continue
-
-        if net.version == 4:
-            ipv4_set.add(net)
-        else:
-            ipv6_set.add(net)
-
-    # === IPv4 / IPv6 分离排序（不聚合）===
-    ipv4_sorted = sorted(
-        ipv4_set,
-        key=lambda n: (int(n.network_address), n.prefixlen),
-    )
-    ipv6_sorted = sorted(
-        ipv6_set,
-        key=lambda n: (int(n.network_address), n.prefixlen),
-    )
-
-    all_ip_cidr = [str(n) for n in ipv4_sorted + ipv6_sorted]
+    # 合并并最终排序
+    all_ip_cidr = sorted(ipv4_list + ipv6_list, key=sort_key)
 
     result = {
         "version": 3,
@@ -147,15 +164,17 @@ def main():
         ]
     }
 
-    with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    with open(OUTPUT_JSON, "w") as f:
+        json.dump(result, f, indent=2)
 
-    os.system(f"sing-box rule-set compile --output {OUTPUT_SRS} {OUTPUT_JSON}")
+    # 编译为 sing-box 二进制规则
+    os.system(
+        f"sing-box rule-set compile --output {OUTPUT_SRS} {OUTPUT_JSON}"
+    )
 
     print("Generated:")
-    print(f"{OUTPUT_JSON} ({len(all_ip_cidr)} entries)")
-    print(OUTPUT_SRS)
+    print(f"- {OUTPUT_JSON}")
+    print(f"- {OUTPUT_SRS}")
 
 
 if __name__ == "__main__":
