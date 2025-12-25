@@ -2,6 +2,7 @@ import math
 import requests
 import json
 import os
+import ipaddress
 import maxminddb
 from aggregate6 import aggregate
 
@@ -10,6 +11,7 @@ CHNROUTES2_URL = "https://raw.githubusercontent.com/misakaio/chnroutes2/master/c
 APNIC_URL = "https://ftp.apnic.net/apnic/stats/apnic/delegated-apnic-latest"
 MAXMIND_URL = "https://raw.githubusercontent.com/Dreamacro/maxmind-geoip/release/Country.mmdb"
 
+# 输出文件
 OUTPUT_JSON = "cn-ip.json"
 OUTPUT_SRS = "cn-ip.srs"
 
@@ -32,6 +34,7 @@ def get_apnic_cn() -> list[str]:
     for line in r.text.splitlines():
         if line.startswith("#"):
             continue
+
         parts = line.split("|")
         if len(parts) < 7:
             continue
@@ -82,12 +85,22 @@ def get_maxmind_cn() -> list[str]:
 def main():
     all_ip_cidr = []
 
+    # 收集三类 IP
     all_ip_cidr.extend(get_chnroutes2())
     all_ip_cidr.extend(get_apnic_cn())
     all_ip_cidr.extend(get_maxmind_cn())
 
-    # 去重 + 聚合
-    all_ip_cidr = aggregate(list(set(all_ip_cidr)))
+    # 去重
+    all_ip_cidr = list(set(all_ip_cidr))
+
+    # CIDR 聚合
+    all_ip_cidr = aggregate(all_ip_cidr)
+
+    # 稳定排序（IPv4 / IPv6 均正确）
+    all_ip_cidr = sorted(
+        all_ip_cidr,
+        key=lambda x: ipaddress.ip_network(x, strict=False)
+    )
 
     result = {
         "version": 3,
@@ -101,6 +114,7 @@ def main():
     with open(OUTPUT_JSON, "w") as f:
         json.dump(result, f, indent=2)
 
+    # 编译为二进制规则
     os.system(
         f"sing-box rule-set compile --output {OUTPUT_SRS} {OUTPUT_JSON}"
     )
