@@ -1,0 +1,50 @@
+name: "Update CN IP rule-set"
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  update-cn-ip:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install sing-box (official)
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL https://sing-box.app/install.sh | sh
+          sing-box version
+
+      - name: Setup python venv
+        run: |
+          set -Eeuo pipefail
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate CN IP rule-set
+        run: |
+          set -Eeuo pipefail
+          source venv/bin/activate
+          python3 generate_cn_ip.py
+
+      - name: Commit and push
+        run: |
+          set -Eeuo pipefail
+
+          if git status --porcelain | grep .; then
+            git config user.name "GitHub Actions"
+            git config user.email "github-actions@github.com"
+            git add cn-ip.json cn-ip.srs
+            git commit -m "Update CN IP rule-set"
+            git push
+          else
+            echo "No changes detected, skip commit."
+          fi
