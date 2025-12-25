@@ -7,7 +7,6 @@ import json
 import os
 import ipaddress
 import maxminddb
-from aggregate6 import aggregate
 
 # ================= 数据源 =================
 
@@ -66,6 +65,11 @@ def get_apnic_cn() -> list[str]:
 
 
 def get_maxmind_cn() -> list[str]:
+    """
+    最大覆盖但严格 CN：
+    - country == CN
+    - registered_country == CN
+    """
     r = requests.get(MAXMIND_URL, timeout=30)
     r.raise_for_status()
 
@@ -78,9 +82,11 @@ def get_maxmind_cn() -> list[str]:
 
     for cidr, info in reader:
         country = None
+
         if info.get("country"):
             country = info["country"].get("iso_code")
-        elif info.get("registered_country"):
+
+        if country != "CN" and info.get("registered_country"):
             country = info["registered_country"].get("iso_code")
 
         if country == "CN":
@@ -94,29 +100,33 @@ def get_maxmind_cn() -> list[str]:
 def main():
     raw_list: list[str] = []
 
+    print("Fetching chnroutes2 …")
     raw_list.extend(get_chnroutes2())
+
+    print("Fetching APNIC CN …")
     raw_list.extend(get_apnic_cn())
+
+    print("Fetching MaxMind CN …")
     raw_list.extend(get_maxmind_cn())
 
-    # 去重
+    # === 去重 ===
     raw_list = list(set(raw_list))
-
-    # === 聚合（返回 ip_network 对象）===
-    aggregated = aggregate(raw_list)
 
     ipv4_set: set[ipaddress.IPv4Network] = set()
     ipv6_set: set[ipaddress.IPv6Network] = set()
 
-    for net in aggregated:
-        if isinstance(net, str):
-            net = ipaddress.ip_network(net, strict=False)
+    for cidr in raw_list:
+        try:
+            net = ipaddress.ip_network(cidr, strict=False)
+        except ValueError:
+            continue
 
         if net.version == 4:
             ipv4_set.add(net)
         else:
             ipv6_set.add(net)
 
-    # === 关键修复：IPv4 / IPv6 分开排序 ===
+    # === IPv4 / IPv6 分离排序（不聚合）===
     ipv4_sorted = sorted(
         ipv4_set,
         key=lambda n: (int(n.network_address), n.prefixlen),
@@ -141,11 +151,10 @@ def main():
         json.dump(result, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    # 编译 sing-box 二进制规则
     os.system(f"sing-box rule-set compile --output {OUTPUT_SRS} {OUTPUT_JSON}")
 
     print("Generated:")
-    print(OUTPUT_JSON)
+    print(f"{OUTPUT_JSON} ({len(all_ip_cidr)} entries)")
     print(OUTPUT_SRS)
 
 
