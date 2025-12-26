@@ -39,12 +39,13 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          if git status --porcelain | grep .; then
+          # Ignore venv folder and only check for the files we care about
+          if git status --porcelain | grep -E "cn-ip.json|cn-ip.srs"; then
             git config user.name "GitHub Actions"
             git config user.email "github-actions@github.com"
             git add cn-ip.json cn-ip.srs
             git commit -m "Update CN IP rule-set"
             git push
           else
-            echo "No changes detected, skip commit."
+            echo "No changes detected, skipping commit."
           fi
